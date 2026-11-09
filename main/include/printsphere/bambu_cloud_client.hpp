@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -361,6 +362,9 @@ class BambuCloudClient {
   mutable std::mutex auth_mutex_{};
   AuthMode auth_mode_ = AuthMode::kPassword;
   std::string tfa_key_{};
+  int64_t tfa_key_issued_us_ = 0;
+  // Cookies set by the password-login response (e.g. CSRF); replayed on the 2FA request.
+  std::map<std::string, std::string> login_cookies_{};
   std::string pending_verification_code_{};
   std::string cached_preview_url_{};
   std::shared_ptr<std::vector<uint8_t>> cached_preview_blob_{};

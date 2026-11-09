@@ -157,6 +157,29 @@ idf.py -B build-lcd_2_8c -DPRINTSPHERE_HW_VARIANT=lcd_2_8c reconfigure
 | `flash/index.html` | Browser installer page |
 | `release/` | Published firmware images and release notes |
 
+## Building with Docker (macOS/Linux)
+
+Without a local ESP-IDF install, build in the official image and flash from the host (Docker on macOS cannot reach USB):
+
+```sh
+docker run --rm -v "$PWD":/project -w /project espressif/idf:v5.5.4 \
+  idf.py -B build-amoled_1_75 -DPRINTSPHERE_HW_VARIANT=amoled_1_75 reconfigure build
+python3 -m venv .venv && .venv/bin/pip install esptool
+.venv/bin/esptool.py --chip esp32s3 --port <PORT> -b 460800 write_flash --flash_mode dio --flash_size 16MB --flash_freq 80m \
+  0x0 build-amoled_1_75/bootloader/bootloader.bin 0x8000 build-amoled_1_75/partition_table/partition-table.bin \
+  0x109000 build-amoled_1_75/ota_data_initial.bin 0x110000 build-amoled_1_75/printsphere_idf.bin
+```
+
+A board that ran different firmware may use another partition layout. Write only the app at `0x110000` once the PrintSphere layout is already on the board; otherwise flash all four images as above.
+
+## Bambu Cloud 2FA notes
+
+- The password login (`api.bambulab.com/v1/user-service/user/login`) returns `loginType: "tfa"` and a `tfaKey`.
+- The 2FA step is `POST <web origin>/api/sign-in/tfa` with `{tfaKey, tfaCode}`. It lives on `bambulab.com`, **not** `api.bambulab.com` (the API host answers 404). The access token comes back in a `token` `Set-Cookie`, not in the JSON body.
+- The web origin enforces double-submit CSRF. Without it the response is `403 {"error":"CSRF error: missing_cookie"}`. First `GET bambulab.com/api/csrf` (returns 204 and sets `bbl_csrf_token`), then send that value both as a cookie and as the `x-bbl-csrf-token` header.
+- A rejected code is cleared so the device asks again. A `tfaKey` older than 5 minutes (or an "expired" response) restarts the password login to get a new key. Reconfiguring with unchanged credentials keeps a pending challenge.
+- Only failures are logged (`Bambu Cloud 2FA rejected: status=... body=...`, `Could not obtain CSRF token`); the code, `tfaKey`, cookies and token are never logged.
+
 ## Release checklist
 
 1. Set the release version in the root `CMakeLists.txt`.
