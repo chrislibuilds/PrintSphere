@@ -606,6 +606,15 @@ uint32_t ams_ui_signature(const PrinterSnapshot& snapshot) {
   }
 
   hash = hash_mix(hash, snapshot.ams->count);
+  if (snapshot.ams->big.present) {
+    for (const AmsTrayInfo& tray : snapshot.ams->big.trays) {
+      hash = hash_mix(hash, tray.present ? 1U : 0U);
+      hash = hash_mix(hash, tray.active ? 1U : 0U);
+      hash = hash_mix(hash, tray.color_rgba);
+      hash = hash_mix(hash, tray.remain_pct < 0 ? 0xFFFFFFFFU : static_cast<uint32_t>(tray.remain_pct));
+      hash = hash_string(hash, tray.material_type);
+    }
+  }
   if (snapshot.ams->count == 0) {
     return hash;
   }
@@ -2072,8 +2081,13 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
       (active_page_ >= kPageIdxAmsFirst && active_page_ <= kPageIdxAmsLast);
   const bool render_ams =
       ams_visible && ams_signature != last_rendered_ams_signature_;
-  if (ams_count > 0 && render_ams) {
+  const bool ams_big = snapshot.ams != nullptr && snapshot.ams->big.present && ams_count == 0;
+  if (ams_big && render_ams) {
     last_rendered_ams_signature_ = ams_signature;
+    render_ams_big(snapshot);
+  } else if (ams_count > 0 && render_ams) {
+    last_rendered_ams_signature_ = ams_signature;
+    set_hidden(ams_big_overlay_, true);
     compute_ams_tray_errors(snapshot);
     const bool show_unit_labels = ams_count > 1;
     for (int u = 0; u < kMaxAmsUnits; ++u) {
@@ -2083,6 +2097,7 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
     }
   } else if (render_ams) {
     last_rendered_ams_signature_ = ams_signature;
+    set_hidden(ams_big_overlay_, true);
     // No AMS — show "No AMS connected" note on the first AMS page only.
     for (int u = 0; u < kMaxAmsUnits; ++u) {
       if (ams_tray_row_[u] != nullptr) {
@@ -2524,6 +2539,112 @@ void Ui::build_ams_page(int unit_idx) {
   lv_obj_set_style_text_color(ams_note_[unit_idx], lv_color_hex(0x666666), 0);
   lv_obj_align(ams_note_[unit_idx], LV_ALIGN_CENTER, 0, 0);
   lv_obj_add_flag(ams_note_[unit_idx], LV_OBJ_FLAG_HIDDEN);
+
+  if (unit_idx == 0) {
+    build_ams_big_overlay(page);
+  }
+}
+
+void Ui::build_ams_big_overlay(lv_obj_t* page) {
+  ams_big_overlay_ = lv_obj_create(page);
+  lv_obj_set_size(ams_big_overlay_, board::kDisplayWidth, board::kDisplayHeight);
+  lv_obj_set_style_radius(ams_big_overlay_, 0, 0);
+  lv_obj_set_style_bg_color(ams_big_overlay_, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(ams_big_overlay_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(ams_big_overlay_, 0, 0);
+  lv_obj_set_style_pad_all(ams_big_overlay_, 0, 0);
+  lv_obj_align(ams_big_overlay_, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_clear_flag(ams_big_overlay_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(ams_big_overlay_, LV_OBJ_FLAG_CLICKABLE);
+  enable_touch_bubble(ams_big_overlay_);
+
+  constexpr int kTile = 88;
+  constexpr int kStep = 96;
+  constexpr int kGridCenterY = 10;
+  for (int i = 0; i < kMaxBigAmsTrays; ++i) {
+    const int col = i % 3;
+    const int row = i / 3;
+    lv_obj_t* tile = lv_obj_create(ams_big_overlay_);
+    ams_big_tile_[i] = tile;
+    lv_obj_set_size(tile, kTile, kTile);
+    lv_obj_set_style_radius(tile, 14, 0);
+    lv_obj_set_style_bg_color(tile, lv_color_hex(0x1F1F1F), 0);
+    lv_obj_set_style_bg_opa(tile, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(tile, 2, 0);
+    lv_obj_set_style_border_color(tile, lv_color_hex(0x3A3A3A), 0);
+    lv_obj_set_style_pad_all(tile, 0, 0);
+    lv_obj_align(tile, LV_ALIGN_CENTER, (col - 1) * kStep, kGridCenterY + (row - 1) * kStep);
+    lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(tile, LV_OBJ_FLAG_CLICKABLE);
+    enable_touch_bubble(tile);
+
+    lv_obj_t* number = lv_label_create(tile);
+    char number_text[4];
+    std::snprintf(number_text, sizeof(number_text), "%d", i + 1);
+    set_label_text_if_changed(number, number_text);
+    lv_obj_set_style_text_font(number, &dosis_20, 0);
+    lv_obj_set_style_text_color(number, lv_color_hex(0x64748B), 0);
+    lv_obj_align(number, LV_ALIGN_TOP_LEFT, 6, 2);
+
+    ams_big_swatch_[i] = lv_obj_create(tile);
+    lv_obj_set_size(ams_big_swatch_[i], 34, 34);
+    lv_obj_set_style_radius(ams_big_swatch_[i], LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(ams_big_swatch_[i], lv_color_hex(0x2A2A2A), 0);
+    lv_obj_set_style_bg_opa(ams_big_swatch_[i], LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(ams_big_swatch_[i], 1, 0);
+    lv_obj_set_style_border_color(ams_big_swatch_[i], lv_color_hex(0x666666), 0);
+    lv_obj_set_style_pad_all(ams_big_swatch_[i], 0, 0);
+    lv_obj_align(ams_big_swatch_[i], LV_ALIGN_TOP_MID, 0, 6);
+    lv_obj_clear_flag(ams_big_swatch_[i], LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(ams_big_swatch_[i], LV_OBJ_FLAG_CLICKABLE);
+
+    ams_big_type_[i] = lv_label_create(tile);
+    set_label_text_if_changed(ams_big_type_[i], "--");
+    lv_obj_set_width(ams_big_type_[i], 80);
+    lv_label_set_long_mode(ams_big_type_[i], LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(ams_big_type_[i], LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(ams_big_type_[i], &dosis_20, 0);
+    lv_obj_set_style_text_color(ams_big_type_[i], lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(ams_big_type_[i], LV_ALIGN_BOTTOM_MID, 0, -24);
+
+    ams_big_pct_[i] = lv_label_create(tile);
+    set_label_text_if_changed(ams_big_pct_[i], "");
+    lv_obj_set_style_text_font(ams_big_pct_[i], &dosis_20, 0);
+    lv_obj_set_style_text_color(ams_big_pct_[i], lv_color_hex(0x94A3B8), 0);
+    lv_obj_align(ams_big_pct_[i], LV_ALIGN_BOTTOM_MID, 0, -2);
+  }
+
+  lv_obj_add_flag(ams_big_overlay_, LV_OBJ_FLAG_HIDDEN);
+}
+
+void Ui::render_ams_big(const PrinterSnapshot& snapshot) {
+  if (ams_big_overlay_ == nullptr || snapshot.ams == nullptr) {
+    return;
+  }
+  set_hidden(ams_big_overlay_, false);
+  for (int i = 0; i < kMaxBigAmsTrays; ++i) {
+    const AmsTrayInfo& tray = snapshot.ams->big.trays[i];
+    lv_obj_set_style_border_color(ams_big_tile_[i],
+                                  lv_color_hex(tray.active ? 0x4ADE80 : 0x3A3A3A), 0);
+    lv_obj_set_style_border_width(ams_big_tile_[i], tray.active ? 3 : 2, 0);
+    if (tray.present) {
+      lv_obj_set_style_bg_color(ams_big_swatch_[i],
+                                lv_color_hex((tray.color_rgba >> 8) & 0x00FFFFFF), 0);
+      set_label_text_if_changed(ams_big_type_[i],
+                                tray.material_type.empty() ? "--" : tray.material_type);
+      char pct[16];
+      if (tray.remain_pct >= 0) {
+        std::snprintf(pct, sizeof(pct), "%d%%", tray.remain_pct);
+      } else {
+        std::snprintf(pct, sizeof(pct), "--");
+      }
+      set_label_text_if_changed(ams_big_pct_[i], pct);
+    } else {
+      lv_obj_set_style_bg_color(ams_big_swatch_[i], lv_color_hex(0x2A2A2A), 0);
+      set_label_text_if_changed(ams_big_type_[i], "--");
+      set_label_text_if_changed(ams_big_pct_[i], "");
+    }
+  }
 }
 
 void Ui::compute_ams_tray_errors(const PrinterSnapshot& snapshot) {
@@ -3359,9 +3480,10 @@ void Ui::update_page_availability_locked(const PrinterSnapshot& snapshot) {
   const bool preview_available = snapshot.preview_page_available;
   const bool camera_available = snapshot.camera_page_available;
   const uint8_t ams_count = snapshot.ams ? snapshot.ams->count : 0;
+  const bool ams_big_present = snapshot.ams != nullptr && snapshot.ams->big.present;
   bool ams_changed = false;
   for (int u = 0; u < kMaxAmsUnits; ++u) {
-    const bool present = u < ams_count;
+    const bool present = u < ams_count || (u == 0 && ams_big_present);
     if (ams_unit_present_[u] != present) {
       ams_unit_present_[u] = present;
       ams_changed = true;

@@ -320,7 +320,8 @@ StatusSourceAdapter make_local_source_adapter(const PrinterSnapshot& snapshot, b
   // The H3C AMS reports climate per zone and its unit id is outside the 0-3 range, so
   // count can stay 0 while zones are present.
   adapter.ams_usable = adapter.fresh && (snapshot.ams != nullptr) &&
-                       (snapshot.ams->count > 0 || snapshot.ams->zone_count > 0);
+                       (snapshot.ams->count > 0 || snapshot.ams->zone_count > 0 ||
+                        snapshot.ams->big.present);
   return adapter;
 }
 

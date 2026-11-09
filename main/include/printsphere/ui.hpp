@@ -129,6 +129,10 @@ class Ui {
   // Build a single AMS-unit page (widgets attached to ams_pages_[unit_idx]).
   // unit_idx 0 also receives the external-spool widgets.
   void build_ams_page(int unit_idx);
+  // Full-page 3x3 tile grid for the large H3C AMS (covers the regular 4-slot widgets of
+  // AMS page 0 while shown).
+  void build_ams_big_overlay(lv_obj_t* page);
+  void render_ams_big(const PrinterSnapshot& snapshot);
   // Apply AMS rendering for a single unit. Called once per visible unit.
   void render_ams_unit(int unit_idx, const PrinterSnapshot& snapshot,
                       bool show_unit_label);
@@ -231,6 +235,11 @@ class Ui {
   lv_obj_t* nozzle_value_label_ = nullptr;
   lv_obj_t* nozzle_aux_label_ = nullptr;
   // H3C AMS climate (one block per compartment, upper-left / upper-right of the main page).
+  lv_obj_t* ams_big_overlay_ = nullptr;
+  lv_obj_t* ams_big_tile_[kMaxBigAmsTrays] = {};
+  lv_obj_t* ams_big_swatch_[kMaxBigAmsTrays] = {};
+  lv_obj_t* ams_big_type_[kMaxBigAmsTrays] = {};
+  lv_obj_t* ams_big_pct_[kMaxBigAmsTrays] = {};
   lv_obj_t* ams_zone_box_[kMaxAmsZones] = {};
   lv_obj_t* ams_zone_temp_label_[kMaxAmsZones] = {};
   lv_obj_t* ams_zone_hum_label_[kMaxAmsZones] = {};

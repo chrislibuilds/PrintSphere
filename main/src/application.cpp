@@ -368,7 +368,12 @@ void Application::run() {
     if (ui_.is_config_page_active()) {
       const auto profiles = config_store_.load_printer_profiles();
       const uint8_t active_idx = config_store_.load_active_printer_index();
-      const bool local_connected = printer_client_.snapshot().local_connected;
+      const PrinterSnapshot card_local_snapshot = printer_client_.snapshot();
+      const bool local_connected = card_local_snapshot.local_connected;
+      // The saved profile model can be empty/stale (set at setup time); for the active
+      // printer prefer the model the firmware has actually detected.
+      const PrinterModel detected_model =
+          preferred_model_for_routing(card_local_snapshot, cloud_client_.snapshot());
       std::vector<Ui::PrinterCardInfo> cards;
       cards.reserve(profiles.size());
       for (const auto& p : profiles) {
@@ -378,6 +383,9 @@ void Application::run() {
         ci.model = p.model;
         ci.host = p.host;
         ci.active = (p.index == active_idx);
+        if (ci.active && detected_model != PrinterModel::kUnknown) {
+          ci.model = to_string(detected_model);
+        }
         ci.connected = ci.active && local_connected;
         cards.push_back(std::move(ci));
       }

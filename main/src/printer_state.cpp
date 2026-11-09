@@ -180,9 +180,12 @@ constexpr ModelCapabilityFlags kModelCapabilities[] = {
     /* kX1E     */ {false, true,  true,  false, true,  false, true,  false, true },
     /* kX2D     */ {false, true,  true,  true,  true,  true,  true,  true,  true },
     /* kA2L     */ {true,  false, false, false, false, false, true,  false, false},
-    // H3C: flags mirror H2C (RTSP camera, chamber temp/light, developer mode for local
-    // status). Unverified on hardware - adjust once confirmed against a real H3C.
-    /* kH3C     */ {false, true,  true,  false, true,  true,  true,  true,  true },
+    // H3C (checked against a real printer's MQTT payload): chamber temp (device.ctc) and
+    // chamber_light present; lights_report has chamber_light + work_light but no
+    // chamber_light2, so no secondary chamber light. RTSP flag unverified: the printer
+    // reports rtsp_url "disable" until LAN live view is enabled. Developer-mode and
+    // cloud-status flags are still copied from H2C.
+    /* kH3C     */ {false, true,  true,  false, true,  false, true,  true,  true },
 };
 
 constexpr size_t kModelCapabilityCount =

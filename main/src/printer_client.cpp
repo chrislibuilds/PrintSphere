@@ -1899,6 +1899,52 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
       const cJSON* ams_array = cJSON_GetObjectItemCaseSensitive(ams_obj, "ams");
       if (ams_array != nullptr && cJSON_IsArray(ams_array)) {
         if (!runtime.ams) runtime.ams = std::make_shared<AmsSnapshot>();
+        // Parses one tray object into `tray` (shared by regular AMS units and the large
+        // H3C AMS). `global_tray_idx` uses the legacy encoding unit_id * 4 + tray_id.
+        auto parse_tray_fields = [&](const cJSON* tray_obj, AmsTrayInfo& tray, int global_tray_idx) {
+              // Detect empty tray: payload with only "id" (and optionally "state").
+              const int field_count = cJSON_GetArraySize(tray_obj);
+              const bool has_only_metadata =
+                  field_count <= 2 &&
+                  cJSON_GetObjectItemCaseSensitive(tray_obj, "id") != nullptr &&
+                  cJSON_GetObjectItemCaseSensitive(tray_obj, "tray_type") == nullptr;
+              if (has_only_metadata) {
+                tray.present = false;
+                tray.material_type.clear();
+                tray.material_name.clear();
+                tray.color_rgba = 0;
+                tray.remain_pct = -1;
+                tray.active = false;
+                return;
+              }
+
+              tray.present = true;
+              const std::string tray_type = json_string(tray_obj, "tray_type", tray.material_type);
+              if (!tray_type.empty()) tray.material_type = tray_type;
+              const std::string sub_brands = json_string(tray_obj, "tray_sub_brands", tray.material_name);
+              if (!sub_brands.empty()) tray.material_name = sub_brands;
+              // Resolve product name from tray_info_idx when sub_brands is empty.
+              if (tray.material_name.empty()) {
+                const std::string tray_idx = json_string(tray_obj, "tray_info_idx", "");
+                if (!tray_idx.empty()) {
+                  const char* resolved = resolve_filament_name(tray_idx.c_str());
+                  if (resolved) tray.material_name = resolved;
+                }
+              }
+              const std::string color_str = json_string(tray_obj, "tray_color", "");
+              if (color_str.size() >= 6) {
+                char* end = nullptr;
+                const uint32_t rgba = static_cast<uint32_t>(std::strtoul(color_str.c_str(), &end, 16));
+                if (end != color_str.c_str()) tray.color_rgba = rgba;
+              }
+
+              const int remain = json_int(tray_obj, "remain", -1);
+              if (remain >= 0 && remain <= 100) tray.remain_pct = remain;
+
+              // Mark active based on global tray_now (which may include snow override).
+          tray.active = (runtime.tray_now == global_tray_idx);
+        };
+
         uint8_t unit_count = 0;
         const cJSON* ams_unit = nullptr;
         cJSON_ArrayForEach(ams_unit, ams_array) {
@@ -1936,6 +1982,21 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
             }
           }
 
+          // Large AMS (H3C AMS 3H): unit id >= 4 with its own tray list (ids 0-8).
+          if (unit_id >= kMaxAmsUnits) {
+            const cJSON* big_trays = cJSON_GetObjectItemCaseSensitive(ams_unit, "tray");
+            if (big_trays != nullptr && cJSON_IsArray(big_trays)) {
+              runtime.ams->big.present = true;
+              const cJSON* big_tray_obj = nullptr;
+              cJSON_ArrayForEach(big_tray_obj, big_trays) {
+                const int big_tray_id = json_int(big_tray_obj, "id", -1);
+                if (big_tray_id < 0 || big_tray_id >= kMaxBigAmsTrays) continue;
+                parse_tray_fields(big_tray_obj, runtime.ams->big.trays[big_tray_id],
+                                  unit_id * kMaxAmsTrays + big_tray_id);
+              }
+            }
+          }
+
           if (unit_id < 0 || unit_id >= kMaxAmsUnits) continue;
           AmsUnitInfo& unit = runtime.ams->units[unit_id];
           unit.present = true;
@@ -1964,48 +2025,7 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
               if (tray_id < 0 || tray_id >= kMaxAmsTrays) continue;
               AmsTrayInfo& tray = unit.trays[tray_id];
 
-              // Detect empty tray: payload with only "id" (and optionally "state").
-              const int field_count = cJSON_GetArraySize(tray_obj);
-              const bool has_only_metadata =
-                  field_count <= 2 &&
-                  cJSON_GetObjectItemCaseSensitive(tray_obj, "id") != nullptr &&
-                  cJSON_GetObjectItemCaseSensitive(tray_obj, "tray_type") == nullptr;
-              if (has_only_metadata) {
-                tray.present = false;
-                tray.material_type.clear();
-                tray.material_name.clear();
-                tray.color_rgba = 0;
-                tray.remain_pct = -1;
-                tray.active = false;
-                continue;
-              }
-
-              tray.present = true;
-              const std::string tray_type = json_string(tray_obj, "tray_type", tray.material_type);
-              if (!tray_type.empty()) tray.material_type = tray_type;
-              const std::string sub_brands = json_string(tray_obj, "tray_sub_brands", tray.material_name);
-              if (!sub_brands.empty()) tray.material_name = sub_brands;
-              // Resolve product name from tray_info_idx when sub_brands is empty.
-              if (tray.material_name.empty()) {
-                const std::string tray_idx = json_string(tray_obj, "tray_info_idx", "");
-                if (!tray_idx.empty()) {
-                  const char* resolved = resolve_filament_name(tray_idx.c_str());
-                  if (resolved) tray.material_name = resolved;
-                }
-              }
-              const std::string color_str = json_string(tray_obj, "tray_color", "");
-              if (color_str.size() >= 6) {
-                char* end = nullptr;
-                const uint32_t rgba = static_cast<uint32_t>(std::strtoul(color_str.c_str(), &end, 16));
-                if (end != color_str.c_str()) tray.color_rgba = rgba;
-              }
-
-              const int remain = json_int(tray_obj, "remain", -1);
-              if (remain >= 0 && remain <= 100) tray.remain_pct = remain;
-
-              // Mark active based on global tray_now (which may include snow override).
-              const int global_tray_idx = unit_id * kMaxAmsTrays + tray_id;
-              tray.active = (runtime.tray_now == global_tray_idx);
+              parse_tray_fields(tray_obj, tray, unit_id * kMaxAmsTrays + tray_id);
             }
           }
         }
@@ -2394,8 +2414,12 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
     if (modules == nullptr) {
       modules = child_array_local(info, "modules");
     }
+    const PrinterModel previous_model = runtime.local_model;
     runtime.local_model = detect_printer_model(
         modules, detect_printer_model_from_payload(info, runtime.local_model));
+    if (runtime.local_model != previous_model) {
+      ESP_LOGI(kTag, "Printer model detected: %s", to_string(runtime.local_model));
+    }
     runtime.chamber_light_supported =
         runtime.chamber_light_supported || printer_model_has_chamber_light(runtime.local_model);
     copy_text(&runtime.resolved_serial,

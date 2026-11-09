@@ -80,6 +80,7 @@ struct SourceCapabilities {
 
 static constexpr int kMaxAmsTrays = 4;
 static constexpr int kMaxAmsUnits = 4;
+static constexpr int kMaxBigAmsTrays = 9;  // single large AMS unit (H3C AMS 3H: 9 trays)
 static constexpr int kMaxAmsZones = 2;  // drying/humidity compartments of one AMS (H3C: 2)
 
 struct AmsTrayInfo {
@@ -98,6 +99,12 @@ struct AmsUnitInfo {
   std::array<AmsTrayInfo, kMaxAmsTrays> trays{};
 };
 
+// A large AMS whose unit id is outside 0-3 and that has more than 4 trays (H3C AMS 3H).
+struct AmsBigUnit {
+  bool present = false;
+  std::array<AmsTrayInfo, kMaxBigAmsTrays> trays{};
+};
+
 // One climate compartment ("zone") of an AMS that reports zone_info (H3C AMS).
 struct AmsZoneInfo {
   bool present = false;
@@ -107,6 +114,7 @@ struct AmsZoneInfo {
 };
 
 struct AmsSnapshot {
+  AmsBigUnit big{};
   uint8_t zone_count = 0;
   std::array<AmsZoneInfo, kMaxAmsZones> zones{};
   uint8_t count = 0;
