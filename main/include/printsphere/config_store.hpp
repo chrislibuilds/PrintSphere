@@ -85,6 +85,9 @@ struct PrinterProfile {
 static constexpr uint8_t kMaxPrinterProfiles = 16;
 
 struct BatteryDisplayPolicy {
+  // Upper limit for the overall display brightness (5..100), applied on every power source.
+  // 100 = no cap (default).
+  int max_brightness_percent = 100;
   bool dim_enabled = true;
   int dim_brightness_percent = 0;
   bool screen_off_enabled = true;

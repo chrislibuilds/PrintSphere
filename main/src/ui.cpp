@@ -519,6 +519,26 @@ void set_label_text_if_changed(lv_obj_t* label, const char* text) {
   lv_label_set_text(label, text);
 }
 
+// LVGL re-invalidates an object (full-screen redraw in our render mode) on every style
+// setter call, even when the value is unchanged. These skip the call when nothing changes.
+void set_translate_y_if_changed(lv_obj_t* obj, int32_t y) {
+  if (obj != nullptr && lv_obj_get_style_translate_y(obj, LV_PART_MAIN) != y) {
+    lv_obj_set_style_translate_y(obj, y, 0);
+  }
+}
+
+void set_opa_if_changed(lv_obj_t* obj, lv_opa_t opa) {
+  if (obj != nullptr && lv_obj_get_style_opa(obj, LV_PART_MAIN) != opa) {
+    lv_obj_set_style_opa(obj, opa, 0);
+  }
+}
+
+void set_text_font_if_changed(lv_obj_t* obj, const lv_font_t* font) {
+  if (obj != nullptr && lv_obj_get_style_text_font(obj, LV_PART_MAIN) != font) {
+    lv_obj_set_style_text_font(obj, font, 0);
+  }
+}
+
 void set_label_text_if_changed(lv_obj_t* label, const std::string& text) {
   set_label_text_if_changed(label, text.c_str());
 }
@@ -1341,6 +1361,7 @@ esp_err_t Ui::initialize() {
   ESP_RETURN_ON_ERROR(bsp_display_rotation_set(bsp_rotation_for(display_rotation_)), kTag,
                       "apply display rotation failed");
 
+
   user_brightness_percent_ = -1;
   applied_brightness_percent_ = -1;
   screen_power_mode_ = ScreenPowerMode::kAwake;
@@ -1525,8 +1546,8 @@ void Ui::apply_page0_parallax(bool force) {
   const int32_t cards_y = static_cast<int32_t>(kParallaxCardsMaxY * clamped / page_w);
   const lv_opa_t page0_opa = static_cast<lv_opa_t>(255 - 255 * clamped / page_w);
 
-  lv_obj_set_style_translate_y(page0_title_, title_y, 0);
-  lv_obj_set_style_translate_y(page0_card_list_, cards_y, 0);
+  set_translate_y_if_changed(page0_title_, title_y);
+  set_translate_y_if_changed(page0_card_list_, cards_y);
   // NOTE: lv_obj_set_style_opa() on large containers forces LVGL to render the entire
   // widget tree into a temporary offscreen layer before blending it at the given opacity.
   // With LV_DRAW_LAYER_SIMPLE_BUF_SIZE=24KB on a 466px-wide display that means ~14 layer
@@ -1534,7 +1555,7 @@ void Ui::apply_page0_parallax(bool force) {
   // fps to ~4. Use only translate_y for the parallax shift; no opa on large containers.
   if (page0_empty_note_ != nullptr) {
     // empty_note is a single small label — opa is cheap here
-    lv_obj_set_style_opa(page0_empty_note_, page0_opa, 0);
+    set_opa_if_changed(page0_empty_note_, page0_opa);
   }
 
   // Overlay (arc, progress, battery): fade in as we leave page 0
@@ -1550,14 +1571,14 @@ void Ui::apply_page0_parallax(bool force) {
     set_hidden(fixed_overlay_, true);
   } else {
     set_hidden(fixed_overlay_, false);
-    lv_obj_set_style_opa(fixed_overlay_, LV_OPA_COVER, 0);
+    set_opa_if_changed(fixed_overlay_, LV_OPA_COVER);
   }
 
   // Small text labels: opa fade is cheap (entire label fits in the 24 KB layer buffer
   // in a single pass), so the visual cross-fade is worth keeping.
-  lv_obj_set_style_opa(progress_label_, overlay_opa, 0);
-  lv_obj_set_style_opa(battery_icon_label_, overlay_opa, 0);
-  lv_obj_set_style_opa(battery_pct_label_, overlay_opa, 0);
+  set_opa_if_changed(progress_label_, overlay_opa);
+  set_opa_if_changed(battery_icon_label_, overlay_opa);
+  set_opa_if_changed(battery_pct_label_, overlay_opa);
 }
 
 void Ui::update_printer_cards(const std::vector<PrinterCardInfo>& cards) {
@@ -2277,8 +2298,8 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
     // "Layer: X / Y", fall back to the regular small font otherwise.
     const bool subnote_is_layer =
         has_camera_image && (snapshot.total_layers > 0 || snapshot.current_layer > 0);
-    lv_obj_set_style_text_font(page3_subnote_,
-                               subnote_is_layer ? &dosis_32 : &lv_font_montserrat_20, 0);
+    set_text_font_if_changed(page3_subnote_,
+                             subnote_is_layer ? &dosis_32 : &lv_font_montserrat_20);
     set_label_text_if_changed(page3_subnote_, camera_subnote);
   }
 
@@ -2317,6 +2338,9 @@ void Ui::stop_ring_animations_locked() {
 void Ui::pulse_anim_exec_cb(void* var, int32_t scale) {
   auto* ui = static_cast<Ui*>(var);
   if (ui == nullptr || ui->status_arc_ == nullptr) return;
+  // Every pulse step repaints the whole 466x466 screen (~75 ms); skip it while a page slide
+  // is in progress so the swipe gets the frames. The pulse resumes when the slide ends.
+  if (ui->scrolling_) return;
   const uint32_t hex = scale_color(ui->pulse_base_hex_, static_cast<uint16_t>(scale));
   if (ui->pulse_both_parts_) {
     if (ui->last_ring_main_hex_ != hex) {
@@ -3907,7 +3931,9 @@ void Ui::handle_screen_event(lv_event_t* event) {
     const float delta = static_cast<float>(dy) * (100.0f / 250.0f);
     const int new_brightness =
         std::clamp(gesture_start_brightness_ + static_cast<int>(std::lround(delta)),
-                   kManualMinBrightnessPercent, 100);
+                   kManualMinBrightnessPercent,
+                   std::max(kManualMinBrightnessPercent,
+                            battery_display_policy_.max_brightness_percent));
     set_brightness_percent(new_brightness);
 
     char buffer[8] = {};
@@ -4102,6 +4128,10 @@ void Ui::request_wake_display() {
 
 void Ui::set_battery_display_policy(const BatteryDisplayPolicy& policy) {
   battery_display_policy_ = policy;
+  battery_display_policy_.max_brightness_percent =
+      std::clamp(battery_display_policy_.max_brightness_percent, 5, 100);
+  // The cap may lower the brightness that is already applied.
+  apply_brightness_policy();
 }
 
 void Ui::apply_brightness_policy() {
@@ -4115,6 +4145,8 @@ void Ui::apply_brightness_policy() {
   } else if (screen_power_mode_ == ScreenPowerMode::kOff) {
     target_brightness = 0;
   }
+  // Overall cap (setup portal), regardless of power source or dim state.
+  target_brightness = std::min(target_brightness, battery_display_policy_.max_brightness_percent);
 
   if (applied_brightness_percent_ == target_brightness) {
     return;

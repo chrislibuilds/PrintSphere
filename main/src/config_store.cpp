@@ -283,6 +283,14 @@ BatteryDisplayPolicy ConfigStore::load_battery_display_policy() const {
   policy.dim_enabled = parse_bool_or_default(load_string("bat_dim"), true);
   policy.screen_off_enabled = parse_bool_or_default(load_string("bat_off"), true);
 
+  const std::string max_br_str = load_string("disp_max_br");
+  if (!max_br_str.empty()) {
+    const long parsed = std::strtol(max_br_str.c_str(), nullptr, 10);
+    if (parsed >= 5 && parsed <= 100) {
+      policy.max_brightness_percent = static_cast<int>(parsed);
+    }
+  }
+
   const std::string pct_str = load_string("bat_dim_pct");
   if (!pct_str.empty()) {
     const long parsed = std::strtol(pct_str.c_str(), nullptr, 10);
@@ -405,6 +413,8 @@ esp_err_t ConfigStore::save_arc_color_scheme(const ArcColorScheme& colors) const
 }
 
 esp_err_t ConfigStore::save_battery_display_policy(const BatteryDisplayPolicy& policy) const {
+  ESP_RETURN_ON_ERROR(save_string("disp_max_br", std::to_string(policy.max_brightness_percent)),
+                      kTag, "save disp_max_br failed");
   ESP_RETURN_ON_ERROR(save_string("bat_dim", policy.dim_enabled ? "1" : "0"), kTag,
                       "save bat_dim failed");
   ESP_RETURN_ON_ERROR(save_string("bat_dim_pct", std::to_string(policy.dim_brightness_percent)),

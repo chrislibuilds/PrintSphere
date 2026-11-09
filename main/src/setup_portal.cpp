@@ -1802,6 +1802,22 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
         "Display dim/off behaviour for battery and optionally USB power. Touch wake stays active.",
         bat_badge_value, bat_badge_class, energy_section_open);
 
+  // Overall brightness cap (applies on USB and battery)
+  html += "<div class=\"field\"><label for=\"max_brightness\">Maximum Brightness (%)</label><select id=\"max_brightness\">";
+  {
+    const int steps[] = {100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 5};
+    for (int step : steps) {
+      html += "<option value=\"";
+      html += std::to_string(step);
+      html += "\"";
+      if (bat_policy.max_brightness_percent == step) html += " selected";
+      html += ">";
+      html += (step == 100 ? std::string("100% (no limit)") : std::to_string(step) + "%");
+      html += "</option>";
+    }
+  }
+  html += "</select></div>";
+
   // Dim on/off
   html += "<div class=\"field\"><label for=\"bat_dim_enabled\">Dim Display on Battery</label><select id=\"bat_dim_enabled\">";
   html += "<option value=\"true\"";
@@ -2415,6 +2431,7 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   html += "const sourceModeSelect=document.getElementById('source_mode');";
   html += "const sourceModeApplyButton=document.getElementById('source-mode-apply-button');";
   html += "const sourceModeApplyHint=document.getElementById('source-mode-apply-hint');";
+  html += "const maxBrightnessSelect=document.getElementById('max_brightness');";
   html += "const batDimSelect=document.getElementById('bat_dim_enabled');";
   html += "const batDimOptionsGroup=document.getElementById('bat-dim-options-group');";
   html += "const batOffOptionsGroup=document.getElementById('bat-off-options-group');";
@@ -2484,7 +2501,9 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   html += cloud_password_saved ? "true" : "false";
   html += ",printer_access_code_saved:";
   html += printer_access_code_saved ? "true" : "false";
-  html += ",bat_dim_enabled:";
+  html += ",max_brightness:\"";
+  html += std::to_string(bat_policy.max_brightness_percent);
+  html += "\",bat_dim_enabled:";
   html += bat_policy.dim_enabled ? "true" : "false";
   html += ",bat_dim_brightness:\"";
   html += std::to_string(bat_policy.dim_brightness_percent);
@@ -2698,6 +2717,7 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
           "if(batOffSelect&&batOffOptionsGroup){batOffOptionsGroup.style.display=batOffSelect.value==='true'?'':'none';}"
           "if(!batDisplayApplyButton||!batDisplayApplyHint)return;"
           "const dimNow=batDimSelect?batDimSelect.value==='true':savedConfig.bat_dim_enabled!==false;"
+          "const maxBrNow=maxBrightnessSelect?maxBrightnessSelect.value:String(savedConfig.max_brightness||'100');"
           "const pctNow=batDimBrightnessSelect?batDimBrightnessSelect.value:String(savedConfig.bat_dim_brightness||'0');"
           "const offNow=batOffSelect?batOffSelect.value==='true':savedConfig.bat_off_enabled!==false;"
           "const diIdleNow=batDimTimeoutIdleSelect?batDimTimeoutIdleSelect.value:String(savedConfig.bat_dim_timeout_idle||20);"
@@ -2706,6 +2726,7 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
           "const ofActNow=batOffTimeoutActiveSelect?batOffTimeoutActiveSelect.value:String(savedConfig.bat_off_timeout_active||120);"
           "const usbPsNow=batUsbPsSelect?batUsbPsSelect.value==='true':savedConfig.bat_usb_ps===true;"
           "const changed=dimNow!==(savedConfig.bat_dim_enabled!==false)"
+              "||maxBrNow!==String(savedConfig.max_brightness||'100')"
               "||pctNow!==String(savedConfig.bat_dim_brightness||'0')"
               "||offNow!==(savedConfig.bat_off_enabled!==false)"
               "||diIdleNow!==String(savedConfig.bat_dim_timeout_idle||20)"
@@ -2887,6 +2908,7 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
               "if(tst)tst.addEventListener('click',((idx)=>async()=>{"
                   "tst.disabled=true;await testEv(idx);"
                   "setTimeout(()=>{tst.disabled=false;},1200);})(i));}}";
+  html += "if(maxBrightnessSelect){maxBrightnessSelect.addEventListener('change',updateBatDisplayControls);}";
   html += "if(batDimSelect){batDimSelect.addEventListener('change',updateBatDisplayControls);}";
   html += "if(batDimBrightnessSelect){batDimBrightnessSelect.addEventListener('change',updateBatDisplayControls);}";
   html += "if(batOffSelect){batOffSelect.addEventListener('change',updateBatDisplayControls);}";
@@ -2896,6 +2918,7 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   html += "if(batOffTimeoutActiveSelect){batOffTimeoutActiveSelect.addEventListener('change',updateBatDisplayControls);}";
   html += "if(batUsbPsSelect){batUsbPsSelect.addEventListener('change',updateBatDisplayControls);}";
   html += "if(batDisplayApplyButton){batDisplayApplyButton.addEventListener('click',async()=>{"
+          "const max_brightness=maxBrightnessSelect?maxBrightnessSelect.value:String(savedConfig.max_brightness||'100');"
           "const bat_dim_enabled=batDimSelect?batDimSelect.value==='true':savedConfig.bat_dim_enabled!==false;"
           "const bat_dim_brightness=batDimBrightnessSelect?batDimBrightnessSelect.value:String(savedConfig.bat_dim_brightness||'0');"
           "const bat_off_enabled=batOffSelect?batOffSelect.value==='true':savedConfig.bat_off_enabled!==false;"
@@ -2905,9 +2928,9 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
           "const bat_off_timeout_active=Number(batOffTimeoutActiveSelect?batOffTimeoutActiveSelect.value:savedConfig.bat_off_timeout_active||120);"
           "const bat_usb_ps=batUsbPsSelect?batUsbPsSelect.value==='true':savedConfig.bat_usb_ps===true;"
           "batDisplayApplyButton.disabled=true;setStatus('Applying energy settings...','Saving settings and restarting the ESP now.',15000);"
-          "try{const response=await fetch('/api/battery-display',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bat_dim_enabled,bat_dim_brightness,bat_off_enabled,bat_dim_timeout_idle,bat_dim_timeout_active,bat_off_timeout_idle,bat_off_timeout_active,bat_usb_ps})});"
+          "try{const response=await fetch('/api/battery-display',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({max_brightness,bat_dim_enabled,bat_dim_brightness,bat_off_enabled,bat_dim_timeout_idle,bat_dim_timeout_active,bat_off_timeout_idle,bat_off_timeout_active,bat_usb_ps})});"
           "const body=await response.json().catch(()=>({}));"
-          "if(response.ok){savedConfig.bat_dim_enabled=bat_dim_enabled;savedConfig.bat_dim_brightness=bat_dim_brightness;savedConfig.bat_off_enabled=bat_off_enabled;"
+          "if(response.ok){savedConfig.max_brightness=max_brightness;savedConfig.bat_dim_enabled=bat_dim_enabled;savedConfig.bat_dim_brightness=bat_dim_brightness;savedConfig.bat_off_enabled=bat_off_enabled;"
               "savedConfig.bat_dim_timeout_idle=bat_dim_timeout_idle;savedConfig.bat_dim_timeout_active=bat_dim_timeout_active;"
               "savedConfig.bat_off_timeout_idle=bat_off_timeout_idle;savedConfig.bat_off_timeout_active=bat_off_timeout_active;"
               "savedConfig.bat_usb_ps=bat_usb_ps;"
@@ -3443,6 +3466,8 @@ esp_err_t SetupPortal::handle_config_get(httpd_req_t* request) {
   body += ",\"arc_setup\":\"" + color_to_html_hex(arc_colors.setup) + "\"";
   body += ",\"arc_offline\":\"" + color_to_html_hex(arc_colors.offline) + "\"";
   body += ",\"arc_unknown\":\"" + color_to_html_hex(arc_colors.unknown) + "\"";
+  body += ",\"max_brightness\":";
+  body += std::to_string(bat_policy_get.max_brightness_percent);
   body += ",\"bat_dim_enabled\":";
   body += bat_policy_get.dim_enabled ? "true" : "false";
   body += ",\"bat_dim_brightness\":";
@@ -3515,6 +3540,7 @@ esp_err_t SetupPortal::handle_config_post(httpd_req_t* request) {
 
   const BatteryDisplayPolicy stored_bat_policy = portal->config_store_.load_battery_display_policy();
   BatteryDisplayPolicy bat_policy_post;
+  bat_policy_post.max_brightness_percent = stored_bat_policy.max_brightness_percent;
   bat_policy_post.dim_enabled = read_bool_field(root, "bat_dim_enabled", stored_bat_policy.dim_enabled);
   bat_policy_post.screen_off_enabled = read_bool_field(root, "bat_off_enabled", stored_bat_policy.screen_off_enabled);
   {
@@ -3744,6 +3770,14 @@ esp_err_t SetupPortal::handle_battery_display_post(httpd_req_t* request) {
 
   const BatteryDisplayPolicy stored = portal->config_store_.load_battery_display_policy();
   BatteryDisplayPolicy policy;
+  policy.max_brightness_percent = stored.max_brightness_percent;
+  {
+    const std::string max_str = trim_copy(read_string_field(root, "max_brightness"));
+    if (!max_str.empty()) {
+      const long parsed = std::strtol(max_str.c_str(), nullptr, 10);
+      if (parsed >= 5 && parsed <= 100) policy.max_brightness_percent = static_cast<int>(parsed);
+    }
+  }
   policy.dim_enabled = read_bool_field(root, "bat_dim_enabled", stored.dim_enabled);
   policy.screen_off_enabled = read_bool_field(root, "bat_off_enabled", stored.screen_off_enabled);
   {
@@ -3770,8 +3804,9 @@ esp_err_t SetupPortal::handle_battery_display_post(httpd_req_t* request) {
   policy.usb_power_save_enabled = read_bool_field(root, "bat_usb_ps", stored.usb_power_save_enabled);
   cJSON_Delete(root);
 
-  ESP_LOGI(kTag, "Saving energy policy: dim=%s pct=%d dim_idle=%us dim_act=%us off=%s off_idle=%us off_act=%us usb_ps=%s",
-           policy.dim_enabled ? "yes" : "no", policy.dim_brightness_percent,
+  ESP_LOGI(kTag, "Saving energy policy: max=%d dim=%s pct=%d dim_idle=%us dim_act=%us off=%s off_idle=%us off_act=%us usb_ps=%s",
+           policy.max_brightness_percent, policy.dim_enabled ? "yes" : "no",
+           policy.dim_brightness_percent,
            policy.dim_timeout_idle_s, policy.dim_timeout_active_s,
            policy.screen_off_enabled ? "yes" : "no",
            policy.off_timeout_idle_s, policy.off_timeout_active_s,
