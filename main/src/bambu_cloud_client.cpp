@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <map>
 #include <cerrno>
 #include <cmath>
 #include <cstdio>
@@ -35,6 +36,7 @@ namespace {
 constexpr char kTag[] = "printsphere.cloud";
 constexpr char kLoginPath[] = "/v1/user-service/user/login";
 constexpr char kTfaLoginPath[] = "/api/sign-in/tfa";
+constexpr char kCsrfPath[] = "/api/csrf";
 constexpr char kEmailCodePath[] = "/v1/user-service/user/sendemail/code";
 constexpr char kSmsCodePath[] = "/v1/user-service/user/sendsmscode";
 constexpr char kBindPath[] = "/v1/iot-service/api/user/bind";
@@ -66,11 +68,13 @@ constexpr uint64_t kCloudLiveDataFreshMs = 120000ULL;
 constexpr uint64_t kCloudOptimisticLightMs = 8000ULL;
 constexpr size_t kMaxCloudMqttPayloadBytes = 64U * 1024U;
 constexpr size_t kMaxJsonResponseBytes = 96U * 1024U;
+constexpr int64_t kTfaKeyMaxAgeUs = 5LL * 60LL * 1000000LL;
 constexpr int kCloudPrintErrorTaskCanceled = 0x0300400C;
 constexpr int kCloudPrintErrorPrintingCancelled = 0x0500400E;
 
 struct TfaCookieContext {
   std::string token;
+  std::map<std::string, std::string> jar;  // every Set-Cookie name=value seen
 };
 
 esp_err_t tfa_event_handler(esp_http_client_event_t* evt) {
@@ -81,6 +85,15 @@ esp_err_t tfa_event_handler(esp_http_client_event_t* evt) {
       evt->header_value != nullptr) {
     if (strcasecmp(evt->header_key, "Set-Cookie") == 0) {
       const std::string cookie(evt->header_value);
+      {
+        const auto eq = cookie.find('=');
+        const auto semi = cookie.find(';');
+        if (eq != std::string::npos && eq > 0 && eq < semi && eq < cookie.size()) {
+          static_cast<TfaCookieContext*>(evt->user_data)
+              ->jar[cookie.substr(0, eq)] =
+              cookie.substr(eq + 1, semi != std::string::npos ? semi - eq - 1 : std::string::npos);
+        }
+      }
       constexpr char kPrefix[] = "token=";
       const auto pos = cookie.find(kPrefix);
       if (pos != std::string::npos) {
@@ -94,6 +107,42 @@ esp_err_t tfa_event_handler(esp_http_client_event_t* evt) {
     }
   }
   return ESP_OK;
+}
+
+// Bambu's web origin uses double-submit CSRF: GET /api/csrf mints the `bbl_csrf_token` cookie,
+// which must then be echoed in the `x-bbl-csrf-token` header (and sent as a cookie) on the POST.
+bool fetch_csrf_token(const std::string& csrf_url, const std::string& cookie_header,
+                      std::string* token_out, std::map<std::string, std::string>* jar_out) {
+  TfaCookieContext ctx;
+  esp_http_client_config_t config = {};
+  config.url = csrf_url.c_str();
+  config.timeout_ms = 10000;
+  config.crt_bundle_attach = esp_crt_bundle_attach;
+  config.method = HTTP_METHOD_GET;
+  config.keep_alive_enable = false;
+  config.buffer_size = 2048;
+  config.buffer_size_tx = 1024;
+  config.event_handler = tfa_event_handler;
+  config.user_data = &ctx;
+  esp_http_client_handle_t client = esp_http_client_init(&config);
+  if (client == nullptr) {
+    return false;
+  }
+  esp_http_client_set_header(client, "User-Agent", "bambu_network_agent/01.09.05.01");
+  esp_http_client_set_header(client, "Accept", "application/json");
+  if (!cookie_header.empty()) {
+    esp_http_client_set_header(client, "Cookie", cookie_header.c_str());
+  }
+  const esp_err_t err = esp_http_client_perform(client);
+  const int status = (err == ESP_OK) ? esp_http_client_get_status_code(client) : -1;
+  esp_http_client_cleanup(client);
+  const auto it = ctx.jar.find("bbl_csrf_token");
+  if (it == ctx.jar.end() || it->second.empty()) {
+    return false;
+  }
+  *token_out = it->second;
+  *jar_out = std::move(ctx.jar);
+  return true;
 }
 
 const char* wifi_second_channel_name(wifi_second_chan_t second) {
@@ -1839,12 +1888,21 @@ void BambuCloudClient::configure(BambuCloudCredentials credentials, std::string 
 void BambuCloudClient::apply_configuration(BambuCloudCredentials credentials,
                                            std::string printer_serial) {
   stop_mqtt_client();
+  // Keep a pending 2FA / email-code challenge (tfaKey + typed code) when the cloud credentials
+  // did not change, so unrelated reconfigures don't invalidate the login in progress.
+  const bool keep_pending_challenge =
+      auth_mode() != AuthMode::kPassword && credentials.email == credentials_.email &&
+      credentials.password == credentials_.password && credentials.region == credentials_.region;
   credentials_ = std::move(credentials);
   requested_serial_ = std::move(printer_serial);
   resolved_serial_.clear();
   cached_preview_url_.clear();
   cached_preview_blob_.reset();
-  clear_auth_state();
+  if (keep_pending_challenge) {
+    ESP_LOGI(kTag, "Cloud reconfigure: credentials unchanged, keeping pending verification state");
+  } else {
+    clear_auth_state();
+  }
   mqtt_username_.clear();
   mqtt_auth_recovery_requested_ = false;
   mqtt_auth_connect_return_code_ = static_cast<int>(MQTT_CONNECTION_ACCEPTED);
@@ -3687,6 +3745,17 @@ bool BambuCloudClient::login() {
     if (code.empty()) {
       return false;
     }
+    int64_t key_age_us = 0;
+    {
+      std::lock_guard<std::mutex> lock(auth_mutex_);
+      key_age_us = esp_timer_get_time() - tfa_key_issued_us_;
+    }
+    if (key_age_us > kTfaKeyMaxAgeUs) {
+      ESP_LOGW(kTag, "2FA key is %lld s old, requesting a fresh one via password login",
+               static_cast<long long>(key_age_us / 1000000LL));
+      clear_auth_state();
+      return authenticate_with_password();
+    }
     return authenticate_with_tfa_code(code);
   }
 
@@ -3940,6 +4009,38 @@ bool BambuCloudClient::authenticate_with_tfa_code(const std::string& code) {
   esp_http_client_set_header(client, "X-BBL-Agent-OS-Type", "linux");
   esp_http_client_set_header(client, "Accept", "application/json");
   esp_http_client_set_header(client, "Content-Type", "application/json");
+  {
+    std::map<std::string, std::string> cookies;
+    {
+      std::lock_guard<std::mutex> lock(auth_mutex_);
+      cookies = login_cookies_;
+    }
+    auto join = [](const std::map<std::string, std::string>& m) {
+      std::string out;
+      for (const auto& kv : m) {
+        if (!out.empty()) {
+          out += "; ";
+        }
+        out += kv.first + "=" + kv.second;
+      }
+      return out;
+    };
+    std::string csrf_token;
+    std::map<std::string, std::string> csrf_jar;
+    if (fetch_csrf_token(cloud_site_url(credentials_.region, kCsrfPath), join(cookies), &csrf_token,
+                         &csrf_jar)) {
+      for (auto& kv : csrf_jar) {
+        cookies[kv.first] = kv.second;
+      }
+      esp_http_client_set_header(client, "x-bbl-csrf-token", csrf_token.c_str());
+    } else {
+      ESP_LOGW(kTag, "Could not obtain CSRF token; 2FA request will likely be rejected");
+    }
+    const std::string cookie_header = join(cookies);
+    if (!cookie_header.empty()) {
+      esp_http_client_set_header(client, "Cookie", cookie_header.c_str());
+    }
+  }
 
   const esp_err_t open_err = esp_http_client_open(client, static_cast<int>(request_body.size()));
   if (open_err != ESP_OK) {
@@ -3973,12 +4074,16 @@ bool BambuCloudClient::authenticate_with_tfa_code(const std::string& code) {
 
   const int status_code = esp_http_client_get_status_code(client);
 
-  // Drain the response body (we don't need it, but must read it to completion)
+  // Read the response body (bounded) so rejections can be diagnosed.
+  std::string tfa_body;
   char drain_buf[256];
   while (true) {
     const int n = esp_http_client_read(client, drain_buf, sizeof(drain_buf));
     if (n <= 0) {
       break;
+    }
+    if (tfa_body.size() < 512) {
+      tfa_body.append(drain_buf, static_cast<size_t>(n));
     }
   }
 
@@ -3986,14 +4091,31 @@ bool BambuCloudClient::authenticate_with_tfa_code(const std::string& code) {
   esp_http_client_cleanup(client);
 
   if (status_code < 200 || status_code >= 300) {
-    ESP_LOGW(kTag, "Bambu Cloud 2FA rejected: status=%d", status_code);
+    ESP_LOGW(kTag, "Bambu Cloud 2FA rejected: status=%d body=%.120s", status_code,
+             tfa_body.c_str());
+    // Drop the used code so the loop waits for the user instead of resubmitting it.
+    clear_pending_code();
+    std::string lower = tfa_body;
+    for (auto& c : lower) {
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (status_code == 410 || lower.find("expire") != std::string::npos ||
+        lower.find("tfakey") != std::string::npos) {
+      // The 2FA session itself is stale: restart from the password login for a new tfaKey.
+      ESP_LOGW(kTag, "2FA session looks expired; restarting password login");
+      clear_auth_state();
+      apply_cloud_session_state(true, false, false, false,
+                                "Bambu Cloud 2FA session expired; logging in again", false, true);
+      return false;
+    }
     apply_cloud_session_state(true, false, true, true,
-                              "Bambu Cloud 2FA code rejected", false, true);
+                              "Bambu Cloud 2FA code rejected; enter a new code", false, true);
     return false;
   }
 
   if (cookie_ctx.token.empty()) {
     ESP_LOGW(kTag, "Bambu Cloud 2FA succeeded but no token cookie received");
+    clear_pending_code();
     apply_cloud_session_state(true, false, true, true,
                               "Bambu Cloud 2FA succeeded but no token received", false, true);
     return false;
@@ -4747,6 +4869,9 @@ bool BambuCloudClient::perform_json_request(const std::string& url, const char* 
   config.keep_alive_enable = false;
   config.buffer_size = 2048;
   config.buffer_size_tx = 1024;
+  TfaCookieContext cookie_ctx;
+  config.event_handler = tfa_event_handler;
+  config.user_data = &cookie_ctx;
 
   esp_http_client_handle_t client = esp_http_client_init(&config);
   if (client == nullptr) {
@@ -4799,6 +4924,10 @@ bool BambuCloudClient::perform_json_request(const std::string& url, const char* 
   }
 
   *status_code = esp_http_client_get_status_code(client);
+  if (url.find(kLoginPath) != std::string::npos && !cookie_ctx.jar.empty()) {
+    std::lock_guard<std::mutex> lock(auth_mutex_);
+    login_cookies_ = cookie_ctx.jar;
+  }
   const int64_t content_length = esp_http_client_get_content_length(client);
   if (content_length > static_cast<int64_t>(kMaxJsonResponseBytes)) {
     ESP_LOGW(kTag, "HTTP JSON response too large for %s: %lld bytes",
@@ -4872,6 +5001,7 @@ void BambuCloudClient::set_auth_mode(AuthMode mode, std::string tfa_key) {
   std::lock_guard<std::mutex> lock(auth_mutex_);
   auth_mode_ = mode;
   tfa_key_ = std::move(tfa_key);
+  tfa_key_issued_us_ = (mode == AuthMode::kTfaCode) ? esp_timer_get_time() : 0;
   if (mode == AuthMode::kPassword) {
     pending_verification_code_.clear();
   }
@@ -4881,6 +5011,7 @@ void BambuCloudClient::clear_auth_state() {
   std::lock_guard<std::mutex> lock(auth_mutex_);
   auth_mode_ = AuthMode::kPassword;
   tfa_key_.clear();
+  login_cookies_.clear();
   pending_verification_code_.clear();
 }
 
