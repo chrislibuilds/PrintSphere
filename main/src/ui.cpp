@@ -1060,6 +1060,9 @@ std::string preview_note_text(const PrinterSnapshot& snapshot) {
   if (!snapshot.preview_url.empty()) {
     return "Loading cloud cover";
   }
+  if (snapshot.preview_other_job) {
+    return "No cover for this job";
+  }
   if (snapshot.connection == PrinterConnectionState::kWaitingForCredentials) {
     return "Set up printer";
   }

@@ -12,6 +12,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "printsphere/bambu_status.hpp"
 #include "printsphere/error_lookup.hpp"
 #include "printsphere/status_resolver.hpp"
 #include "printsphere/time_sync.hpp"
@@ -342,6 +343,8 @@ void Application::run() {
   ESP_ERROR_CHECK(printer_client_.start());
   camera_client_.configure(printer_connection);
   ESP_ERROR_CHECK(camera_client_.start());
+  local_preview_client_.configure(printer_connection);
+  ESP_ERROR_CHECK(local_preview_client_.start());
 
   ESP_LOGI(kTag, "Bootstrap complete");
 
@@ -358,6 +361,7 @@ void Application::run() {
       const PrinterConnection new_conn = config_store_.load_active_printer_profile().to_connection();
       printer_client_.configure(new_conn);
       camera_client_.configure(new_conn);
+      local_preview_client_.configure(new_conn);
       cloud_client_.configure(config_store_.load_cloud_credentials(), new_conn.serial);
       ESP_LOGI(kTag, "Switched active printer to profile %d", switch_idx);
     }
@@ -471,6 +475,7 @@ void Application::run() {
         (source_mode_ == SourceMode::kLocalOnly || hybrid_local_camera_demand);
     printer_client_.set_network_ready(local_network_ready);
     camera_client_.set_network_ready(local_camera_network_ready);
+    local_preview_client_.set_network_ready(local_network_ready);
 
     local_snapshot.wifi_connected = wifi_connected;
     local_snapshot.wifi_ip = wifi_ip;
@@ -479,6 +484,17 @@ void Application::run() {
     local_snapshot.setup_ap_password = wifi_manager_.setup_access_point_password();
     local_snapshot.setup_ap_ip = wifi_manager_.setup_access_point_ip();
     camera_client_.observe_printer_snapshot(local_snapshot);
+    // Cover read from the printer itself (covers LAN-started jobs the cloud doesn't know).
+    local_preview_client_.request(local_snapshot.job_name);
+    {
+      const LocalPreviewSnapshot local_cover = local_preview_client_.snapshot();
+      if (local_cover.blob != nullptr && !local_snapshot.job_name.empty() &&
+          bambu_job_keys_match(bambu_job_match_key(local_snapshot.job_name),
+                               local_cover.job_key)) {
+        local_snapshot.preview_blob = local_cover.blob;
+        local_snapshot.preview_title = local_cover.title;
+      }
+    }
     if (last_local_print_live_ && local_snapshot.non_error_stop) {
       stop_banner_until_tick_ = now_tick + kStopBannerDuration;
     } else if (source_mode_ != SourceMode::kCloudOnly && !local_snapshot.non_error_stop) {
@@ -753,6 +769,7 @@ void Application::run() {
     const bool on_battery = power.available && power.battery_present && !power.usb_present;
     const bool preview_pipeline_enabled =
         source_mode_ == SourceMode::kCloudOnly || preview_page_active;
+    cloud_client_.set_expected_job_name(local_snapshot.job_name);
     cloud_client_.set_preview_fetch_enabled(source_mode_ != SourceMode::kLocalOnly &&
                                             preview_pipeline_enabled);
     const bool provisioning_active =

@@ -57,6 +57,7 @@ enum class PrinterModel : uint8_t {
   kX1E,
   kX2D,
   kA2L,
+  kH3C,
 };
 
 enum class FieldSource : uint8_t {
@@ -114,6 +115,8 @@ struct PrinterSnapshot {
   std::string job_name;
   std::string gcode_file;
   std::string preview_hint;
+  // True when a cloud cover exists but belongs to a different job than the one running.
+  bool preview_other_job = false;
   std::string preview_url;
   std::shared_ptr<std::vector<uint8_t>> preview_blob;
   std::string preview_title;

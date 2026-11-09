@@ -51,6 +51,7 @@ idf_component_register(
         "include/font/mdi_30.c"
         "include/font/mdi_40.c"
         "src/pmu.cpp"
+        "src/local_preview_client.cpp"
         "src/p1s_camera_client.cpp"
         "src/printer_client.cpp"
         "src/printer_state.cpp"

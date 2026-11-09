@@ -113,6 +113,8 @@ const char* to_string(PrinterModel model) {
       return "X2D";
     case PrinterModel::kA2L:
       return "A2L";
+    case PrinterModel::kH3C:
+      return "H3C";
     case PrinterModel::kUnknown:
     default:
       return "UNKNOWN";
@@ -178,6 +180,9 @@ constexpr ModelCapabilityFlags kModelCapabilities[] = {
     /* kX1E     */ {false, true,  true,  false, true,  false, true,  false, true },
     /* kX2D     */ {false, true,  true,  true,  true,  true,  true,  true,  true },
     /* kA2L     */ {true,  false, false, false, false, false, true,  false, false},
+    // H3C: flags mirror H2C (RTSP camera, chamber temp/light, developer mode for local
+    // status). Unverified on hardware - adjust once confirmed against a real H3C.
+    /* kH3C     */ {false, true,  true,  false, true,  true,  true,  true,  true },
 };
 
 constexpr size_t kModelCapabilityCount =
@@ -185,7 +190,7 @@ constexpr size_t kModelCapabilityCount =
 
 // Compile-time guard: the table must have one row per enum value.
 // Update this constant if the PrinterModel enum gains/loses members.
-static_assert(kModelCapabilityCount == 15,
+static_assert(kModelCapabilityCount == 16,
               "kModelCapabilities row count must match PrinterModel enum size");
 
 constexpr const ModelCapabilityFlags& caps_for(PrinterModel model) {

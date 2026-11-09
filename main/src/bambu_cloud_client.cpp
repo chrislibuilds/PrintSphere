@@ -60,6 +60,8 @@ constexpr TickType_t kCloudStatusPollLowPower = pdMS_TO_TICKS(180000);
 constexpr TickType_t kCloudInitialPreviewDelay = pdMS_TO_TICKS(8000);
 constexpr TickType_t kCloudPreviewWakePoll = pdMS_TO_TICKS(2000);
 constexpr TickType_t kCloudPreviewRetryBackoff = pdMS_TO_TICKS(30000);
+constexpr TickType_t kCloudPreviewMismatchRetry = pdMS_TO_TICKS(15000);
+constexpr uint32_t kCloudPreviewMismatchMaxRetries = 8;
 constexpr TickType_t kCloudBindingRefresh = pdMS_TO_TICKS(300000);
 constexpr int kCloudAuthRetryBackoffSeconds = 30;
 constexpr int64_t kCloudAuthRetryBackoffUs =
@@ -1997,6 +1999,27 @@ void BambuCloudClient::set_fetch_paused(bool paused) {
   }
 }
 
+void BambuCloudClient::set_expected_job_name(const std::string& job_name) {
+  std::lock_guard<std::mutex> lock(expected_job_mutex_);
+  expected_job_name_ = job_name;
+}
+
+// Key of the job whose cover we want: the local printer's job if known, else the cloud
+// live job while a print is active. Empty when there is nothing to match against.
+std::string BambuCloudClient::effective_job_key() const {
+  {
+    std::lock_guard<std::mutex> lock(expected_job_mutex_);
+    if (!expected_job_name_.empty()) {
+      return bambu_job_match_key(expected_job_name_);
+    }
+  }
+  const CloudLiveRuntimeState live = live_runtime_copy();
+  const bool active = live.lifecycle == PrintLifecycleState::kPreparing ||
+                      live.lifecycle == PrintLifecycleState::kPrinting ||
+                      live.lifecycle == PrintLifecycleState::kPaused;
+  return active ? bambu_job_match_key(text_string(live.job_name)) : std::string();
+}
+
 void BambuCloudClient::set_preview_fetch_enabled(bool enabled) {
   const bool previous = preview_fetch_enabled_.exchange(enabled);
   if (!previous && enabled && task_handle_ != nullptr) {
@@ -3429,6 +3452,8 @@ void BambuCloudClient::task_loop() {
   TickType_t preview_retry_not_before_tick = 0;
   bool last_preview_fetch_enabled = false;
   bool last_preview_active_print = false;
+  std::string preview_job_key;           // live job the retry counter below belongs to
+  uint32_t preview_mismatch_retries = 0;  // refetches spent on that job's cover
   TickType_t last_binding_fetch_tick = 0;
   uint32_t cloud_initial_sync_failures = 0;
   TickType_t cloud_mqtt_restart_not_before_tick = 0;
@@ -3672,11 +3697,27 @@ void BambuCloudClient::task_loop() {
         preview_snapshot.preview_url.empty() || preview_snapshot.preview_blob == nullptr;
     const bool preview_backoff_active =
         preview_retry_not_before_tick != 0 && now_tick < preview_retry_not_before_tick;
+    // The cloud task list can lag behind a freshly started print, so the single fetch at
+    // print start may return the previous job's cover. Re-fetch (bounded per job) until
+    // the cover title matches the job the printer reports.
+    bool preview_job_mismatch = false;
+    if (active_print && preview_fetch_enabled) {
+      const std::string live_key = effective_job_key();
+      if (live_key != preview_job_key) {
+        preview_job_key = live_key;
+        preview_mismatch_retries = 0;
+      }
+      preview_job_mismatch =
+          !live_key.empty() && !preview_snapshot.preview_title.empty() &&
+          !bambu_job_keys_match(live_key, bambu_job_match_key(preview_snapshot.preview_title)) &&
+          preview_mismatch_retries < kCloudPreviewMismatchMaxRetries &&
+          (now_tick - last_preview_fetch_tick) >= kCloudPreviewMismatchRetry;
+    }
     const bool preview_due =
         preview_fetch_enabled && initial_preview_window_open &&
         !preview_backoff_active &&
         ((last_preview_fetch_tick == 0) || !last_preview_fetch_enabled || preview_missing ||
-         (active_print && !last_preview_active_print));
+         (active_print && !last_preview_active_print) || preview_job_mismatch);
 
     bool bindings_ok = true;
     bool preview_ok = true;
@@ -3690,6 +3731,9 @@ void BambuCloudClient::task_loop() {
       }
       if (preview_fetch_enabled && preview_due && !waiting_for_live_payload) {
         preview_ok = fetch_latest_preview(true);
+        if (preview_job_mismatch) {
+          ++preview_mismatch_retries;
+        }
         if (preview_ok) {
           last_preview_fetch_tick = now_tick;
           preview_retry_not_before_tick = 0;
@@ -4384,6 +4428,9 @@ bool BambuCloudClient::fetch_latest_preview(bool allow_preview_download) {
   std::string selected_title;
   const std::string expected_serial = !resolved_serial_.empty() ? resolved_serial_ : requested_serial_;
   const cJSON* selected_item = nullptr;
+  // The cover must belong to the job the printer reports; otherwise an older task with
+  // metrics/cover can outscore the new one.
+  const std::string live_job_key = effective_job_key();
   int best_priority = -1;
   int64_t best_timestamp = -1;
 
@@ -4441,8 +4488,10 @@ bool BambuCloudClient::fetch_latest_preview(bool allow_preview_download) {
         }
       }
 
-      const int candidate_score =
-          candidate_priority + has_metrics_bonus + has_cover_bonus + has_title_bonus;
+      const int live_job_bonus =
+          bambu_job_keys_match(live_job_key, bambu_job_match_key(candidate_title)) ? 1000 : 0;
+      const int candidate_score = candidate_priority + has_metrics_bonus + has_cover_bonus +
+                                  has_title_bonus + live_job_bonus;
       if (selected_item == nullptr || candidate_score > best_priority ||
           (candidate_score == best_priority && candidate_timestamp > best_timestamp)) {
         selected_item = item;

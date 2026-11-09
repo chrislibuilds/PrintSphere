@@ -5,6 +5,7 @@
 #include "printsphere/audio_notifier.hpp"
 #include "printsphere/bambu_cloud_client.hpp"
 #include "printsphere/config_store.hpp"
+#include "printsphere/local_preview_client.hpp"
 #include "printsphere/p1s_camera_client.hpp"
 #include "printsphere/pmu.hpp"
 #include "printsphere/printer_client.hpp"
@@ -27,6 +28,7 @@ class Application {
   BambuCloudClient cloud_client_{};
   PrinterClient printer_client_{};
   P1sCameraClient camera_client_{};
+  LocalPreviewClient local_preview_client_{};
   Ui ui_{};
   SetupPortal setup_portal_;
   SerialProvisioner serial_provisioner_;

@@ -193,6 +193,9 @@ class BambuCloudClient {
     }
   }
   void set_preview_fetch_enabled(bool enabled);
+  // Job name reported by the local printer connection (empty = none). Lets the cover
+  // selection follow the running job when the cloud MQTT feed has no live job name.
+  void set_expected_job_name(const std::string& job_name);
   void request_reload_from_store() {
     reload_requested_.store(true);
     if (task_handle_ != nullptr) {
@@ -326,6 +329,9 @@ class BambuCloudClient {
   std::atomic<bool> fetch_paused_{false};
   std::atomic<bool> live_mqtt_enabled_{true};
   std::atomic<bool> preview_fetch_enabled_{false};
+  mutable std::mutex expected_job_mutex_;
+  std::string expected_job_name_;
+  std::string effective_job_key() const;
   std::atomic<bool> reload_requested_{false};
   std::atomic<bool> reconfigure_requested_{false};
   std::atomic<bool> mqtt_stop_requested_{false};

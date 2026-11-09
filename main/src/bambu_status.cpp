@@ -15,6 +15,34 @@ std::string normalize_bambu_status_token(const std::string& status_text) {
   return normalized;
 }
 
+std::string bambu_job_match_key(const std::string& name) {
+  std::string trimmed = name;
+  const size_t slash = trimmed.find_last_of("/\\");
+  if (slash != std::string::npos) {
+    trimmed = trimmed.substr(slash + 1);
+  }
+  for (const std::string suffix : {".gcode.3mf", ".3mf", ".gcode"}) {
+    if (trimmed.size() >= suffix.size() &&
+        trimmed.compare(trimmed.size() - suffix.size(), suffix.size(), suffix) == 0) {
+      trimmed.resize(trimmed.size() - suffix.size());
+      break;
+    }
+  }
+  return normalize_bambu_status_token(trimmed);
+}
+
+bool bambu_job_keys_match(const std::string& a, const std::string& b) {
+  if (a.empty() || b.empty()) {
+    return false;
+  }
+  if (a == b) {
+    return true;
+  }
+  const std::string& shorter = a.size() <= b.size() ? a : b;
+  const std::string& longer = a.size() <= b.size() ? b : a;
+  return shorter.size() >= 4 && longer.find(shorter) != std::string::npos;
+}
+
 PrinterModel bambu_model_from_product_name(const std::string& product_name) {
   const std::string normalized = normalize_bambu_status_token(product_name);
   if (normalized.find("A1MINI") != std::string::npos) {
@@ -46,6 +74,9 @@ PrinterModel bambu_model_from_product_name(const std::string& product_name) {
   }
   if (normalized.find("H2C") != std::string::npos) {
     return PrinterModel::kH2C;
+  }
+  if (normalized.find("H3C") != std::string::npos) {
+    return PrinterModel::kH3C;
   }
   if (normalized.find("X2D") != std::string::npos) {
     return PrinterModel::kX2D;

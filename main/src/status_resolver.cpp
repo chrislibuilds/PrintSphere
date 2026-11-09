@@ -1039,9 +1039,26 @@ PrinterSnapshot merge_status_sources(const PrinterSnapshot& local_snapshot, bool
     snapshot.ams = cloud_snapshot.ams;
   }
 
-  if (cloud_enabled && cloud_preview_available(cloud_snapshot, now_ms)) {
+  // Never show a cover belonging to a different job than the one the local printer is
+  // running (e.g. LAN-started prints have no cloud task, so the list only holds old jobs).
+  const bool cloud_preview_is_other_job =
+      local_source.metrics_usable && !local_snapshot.job_name.empty() &&
+      !cloud_snapshot.preview_title.empty() &&
+      !bambu_job_keys_match(bambu_job_match_key(local_snapshot.job_name),
+                            bambu_job_match_key(cloud_snapshot.preview_title));
+  snapshot.preview_other_job = cloud_enabled && cloud_preview_is_other_job;
+  if (cloud_enabled && !cloud_preview_is_other_job &&
+      cloud_preview_available(cloud_snapshot, now_ms)) {
     snapshot.preview_source = FieldSource::kCloud;
     apply_cloud_preview_bundle(snapshot, cloud_snapshot);
+  }
+  if (snapshot.preview_source != FieldSource::kCloud && local_enabled &&
+      local_snapshot.preview_blob != nullptr && !local_snapshot.preview_blob->empty()) {
+    snapshot.preview_source = FieldSource::kLocal;
+    snapshot.preview_blob = local_snapshot.preview_blob;
+    snapshot.preview_title = local_snapshot.preview_title;
+    snapshot.preview_url.clear();
+    snapshot.preview_other_job = false;
   }
   if (local_enabled && local_camera_available(local_snapshot)) {
     snapshot.camera_source = FieldSource::kLocal;
