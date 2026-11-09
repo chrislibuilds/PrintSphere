@@ -73,6 +73,9 @@ constexpr int kPage3SubnoteWithImageY = 182;
 // status sits above with comfortable breathing room.
 constexpr int kPage3StatusAboveImageY = -138;
 constexpr int kAuxTempRowY = 28;
+// Centre offsets of the AMS compartment climate blocks (upper-left / upper-right quarters).
+constexpr int kAmsZoneX = 128;
+constexpr int kAmsZoneY = -95;
 constexpr int kSwipeThresholdPx = 24;
 constexpr int kGestureAxisLockMarginPx = 16;
 constexpr int kBrightnessHorizontalTolerancePx = 18;
@@ -2031,6 +2034,30 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
     set_label_text_if_changed(bed_aux_label_, bed_aux);
   }
 
+  // AMS compartment climate: shown only when the printer reports zones (H3C AMS).
+  for (int z = 0; z < kMaxAmsZones; ++z) {
+    const bool zone_present =
+        snapshot.ams != nullptr && z < snapshot.ams->zone_count && snapshot.ams->zones[z].present;
+    set_hidden(ams_zone_box_[z], !zone_present);
+    if (!zone_present) {
+      continue;
+    }
+    const AmsZoneInfo& zone = snapshot.ams->zones[z];
+    char zone_buffer[24] = {};
+    if (zone.has_temperature) {
+      std::snprintf(zone_buffer, sizeof(zone_buffer), "%.1f%s", zone.temperature_c, kDegreeC);
+    } else {
+      std::snprintf(zone_buffer, sizeof(zone_buffer), "--%s", kDegreeC);
+    }
+    set_label_text_if_changed(ams_zone_temp_label_[z], zone_buffer);
+    if (zone.humidity_pct >= 0) {
+      std::snprintf(zone_buffer, sizeof(zone_buffer), "%d%%", zone.humidity_pct);
+    } else {
+      std::snprintf(zone_buffer, sizeof(zone_buffer), "--%%");
+    }
+    set_label_text_if_changed(ams_zone_hum_label_[z], zone_buffer);
+  }
+
   const std::string battery_icon = battery_icon_text(snapshot);
   const std::string battery_pct = battery_pct_text(snapshot);
   const bool show_battery = snapshot.battery_present || snapshot.charging;
@@ -3044,6 +3071,32 @@ esp_err_t Ui::build_dashboard() {
   set_label_text_if_changed(remaining_label_, "--m");
   lv_obj_set_style_text_font(remaining_label_, dosis40, 0);
   lv_obj_set_style_text_color(remaining_label_, lv_color_hex(0x87CEEB), 0);
+
+  // AMS compartment climate (temperature + humidity), upper-left and upper-right quarters.
+  for (int z = 0; z < kMaxAmsZones; ++z) {
+    ams_zone_box_[z] = lv_obj_create(page1_);
+    make_transparent(ams_zone_box_[z]);
+    lv_obj_set_size(ams_zone_box_[z], 96, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(ams_zone_box_[z], LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(ams_zone_box_[z], LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_align(ams_zone_box_[z], LV_ALIGN_CENTER, z == 0 ? -kAmsZoneX : kAmsZoneX, kAmsZoneY);
+    lv_obj_clear_flag(ams_zone_box_[z], LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(ams_zone_box_[z], LV_OBJ_FLAG_CLICKABLE);
+    enable_touch_bubble(ams_zone_box_[z]);
+
+    ams_zone_temp_label_[z] = lv_label_create(ams_zone_box_[z]);
+    set_label_text_if_changed(ams_zone_temp_label_[z], std::string("--") + kDegreeC);
+    lv_obj_set_style_text_font(ams_zone_temp_label_[z], dosis20, 0);
+    lv_obj_set_style_text_color(ams_zone_temp_label_[z], lv_color_hex(0xF2B26B), 0);
+
+    ams_zone_hum_label_[z] = lv_label_create(ams_zone_box_[z]);
+    set_label_text_if_changed(ams_zone_hum_label_[z], "--%");
+    lv_obj_set_style_text_font(ams_zone_hum_label_[z], dosis20, 0);
+    lv_obj_set_style_text_color(ams_zone_hum_label_[z], lv_color_hex(0x4A90D9), 0);
+
+    lv_obj_add_flag(ams_zone_box_[z], LV_OBJ_FLAG_HIDDEN);
+  }
 
   portal_hint_label_ = lv_label_create(page1_);
   set_label_text_if_changed(portal_hint_label_, "");

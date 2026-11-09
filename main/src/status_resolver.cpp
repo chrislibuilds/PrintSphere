@@ -317,7 +317,10 @@ StatusSourceAdapter make_local_source_adapter(const PrinterSnapshot& snapshot, b
       adapter.error_supported && adapter.fresh &&
       (snapshot.print_error_code != 0 || !snapshot.hms_codes.empty() ||
        snapshot.hms_alert_count > 0 || snapshot.non_error_stop || snapshot.has_error);
-  adapter.ams_usable = adapter.fresh && (snapshot.ams != nullptr) && snapshot.ams->count > 0;
+  // The H3C AMS reports climate per zone and its unit id is outside the 0-3 range, so
+  // count can stay 0 while zones are present.
+  adapter.ams_usable = adapter.fresh && (snapshot.ams != nullptr) &&
+                       (snapshot.ams->count > 0 || snapshot.ams->zone_count > 0);
   return adapter;
 }
 

@@ -80,6 +80,7 @@ struct SourceCapabilities {
 
 static constexpr int kMaxAmsTrays = 4;
 static constexpr int kMaxAmsUnits = 4;
+static constexpr int kMaxAmsZones = 2;  // drying/humidity compartments of one AMS (H3C: 2)
 
 struct AmsTrayInfo {
   bool present = false;
@@ -97,7 +98,17 @@ struct AmsUnitInfo {
   std::array<AmsTrayInfo, kMaxAmsTrays> trays{};
 };
 
+// One climate compartment ("zone") of an AMS that reports zone_info (H3C AMS).
+struct AmsZoneInfo {
+  bool present = false;
+  int humidity_pct = -1;         // 0-100% relative humidity, -1 = unknown
+  bool has_temperature = false;
+  float temperature_c = 0.0f;
+};
+
 struct AmsSnapshot {
+  uint8_t zone_count = 0;
+  std::array<AmsZoneInfo, kMaxAmsZones> zones{};
   uint8_t count = 0;
   std::array<AmsUnitInfo, kMaxAmsUnits> units{};
   AmsTrayInfo external_spool{};  // vt_tray: external spool info

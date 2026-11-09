@@ -1903,6 +1903,39 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
         const cJSON* ams_unit = nullptr;
         cJSON_ArrayForEach(ams_unit, ams_array) {
           const int unit_id = json_int(ams_unit, "id", -1);
+
+          // H3C AMS: unit id is not 0-3 and the climate data is per compartment in
+          // zone_info[] (humidity_raw %, temp °C, zone_id). Parse it before the unit-id
+          // range check below, which skips such units.
+          const cJSON* zone_info = cJSON_GetObjectItemCaseSensitive(ams_unit, "zone_info");
+          if (zone_info != nullptr && cJSON_IsArray(zone_info)) {
+            const cJSON* zone = nullptr;
+            cJSON_ArrayForEach(zone, zone_info) {
+              const int zone_id = json_int(zone, "zone_id", -1);
+              if (zone_id < 0 || zone_id >= kMaxAmsZones) continue;
+              AmsZoneInfo& z = runtime.ams->zones[zone_id];
+              z.present = true;
+              const int hum_raw = json_int(zone, "humidity_raw", -1);
+              if (hum_raw >= 0 && hum_raw <= 100) {
+                z.humidity_pct = hum_raw;
+              } else {
+                const int hum_idx = json_int(zone, "humidity", -1);
+                if (hum_idx >= 1 && hum_idx <= 5) {
+                  static constexpr int kZoneHumApprox[] = {10, 30, 48, 63, 85};
+                  z.humidity_pct = kZoneHumApprox[hum_idx - 1];
+                }
+              }
+              const float zone_temp = json_number(zone, "temp", -999.0f);
+              if (zone_temp >= 0.0f && zone_temp <= 100.0f) {
+                z.temperature_c = zone_temp;
+                z.has_temperature = true;
+              }
+              if (zone_id + 1 > runtime.ams->zone_count) {
+                runtime.ams->zone_count = static_cast<uint8_t>(zone_id + 1);
+              }
+            }
+          }
+
           if (unit_id < 0 || unit_id >= kMaxAmsUnits) continue;
           AmsUnitInfo& unit = runtime.ams->units[unit_id];
           unit.present = true;

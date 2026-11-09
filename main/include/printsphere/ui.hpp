@@ -230,6 +230,10 @@ class Ui {
   lv_obj_t* nozzle_prefix_label_ = nullptr;
   lv_obj_t* nozzle_value_label_ = nullptr;
   lv_obj_t* nozzle_aux_label_ = nullptr;
+  // H3C AMS climate (one block per compartment, upper-left / upper-right of the main page).
+  lv_obj_t* ams_zone_box_[kMaxAmsZones] = {};
+  lv_obj_t* ams_zone_temp_label_[kMaxAmsZones] = {};
+  lv_obj_t* ams_zone_hum_label_[kMaxAmsZones] = {};
   lv_obj_t* bed_prefix_label_ = nullptr;
   lv_obj_t* bed_value_label_ = nullptr;
   lv_obj_t* bed_aux_label_ = nullptr;
