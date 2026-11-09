@@ -161,24 +161,37 @@ class LvglLockGuard {
 
   ~LvglLockGuard() {
     if (locked_) {
-      const uint32_t held_ms = esp_log_timestamp() - acquired_ts_;
-      const char* last_phase = phase_;
-      const uint32_t since_phase = phase_ts_ != 0 ? (esp_log_timestamp() - phase_ts_) : 0;
+      const uint32_t now = esp_log_timestamp();
+      const uint32_t held_ms = now - acquired_ts_;
+      close_phase(now);
       active_ = previous_active_;
       bsp_display_unlock();
       if (held_ms > 80) {
-        ESP_LOGW(kTag,
-                 "LVGL lock held %lums (caller=%s seq=%lu phase=%s phase_ms=%lu)",
+        // Breakdown of the phases that took >= 5 ms (the other phases are noise).
+        char breakdown[160];
+        size_t used = 0;
+        breakdown[0] = '\0';
+        for (int i = 0; i < phase_log_count_ && used + 24 < sizeof(breakdown); ++i) {
+          if (phase_log_ms_[i] >= 5) {
+            used += std::snprintf(breakdown + used, sizeof(breakdown) - used, "%s=%lu ",
+                                  phase_log_[i], (unsigned long)phase_log_ms_[i]);
+          }
+        }
+        ESP_LOGW(kTag, "LVGL lock held %lums (caller=%s seq=%lu lead=%lu phases: %s)",
                  (unsigned long)held_ms, caller_, (unsigned long)acquire_seq_,
-                 last_phase != nullptr ? last_phase : "-",
-                 (unsigned long)since_phase);
+                 (unsigned long)lead_ms_, used > 0 ? breakdown : "none>=5ms");
       }
     }
   }
 
   void mark_phase(const char* phase) {
+    const uint32_t now = esp_log_timestamp();
+    if (phase_ == nullptr) {
+      lead_ms_ = now - acquired_ts_;  // time spent before the first annotated phase
+    }
+    close_phase(now);
     phase_ = phase;
-    phase_ts_ = esp_log_timestamp();
+    phase_ts_ = now;
   }
 
   // Annotate the currently active guard from anywhere underneath it.
@@ -194,8 +207,22 @@ class LvglLockGuard {
   static uint32_t total_acquires_;
 
  private:
+  // Records how long the phase that is ending ran.
+  void close_phase(uint32_t now) {
+    if (phase_ != nullptr && phase_log_count_ < kMaxPhaseLog) {
+      phase_log_[phase_log_count_] = phase_;
+      phase_log_ms_[phase_log_count_] = now - phase_ts_;
+      ++phase_log_count_;
+    }
+  }
+
+  static constexpr int kMaxPhaseLog = 16;
   const char* caller_ = "?";
   const char* phase_ = nullptr;
+  const char* phase_log_[kMaxPhaseLog] = {};
+  uint32_t phase_log_ms_[kMaxPhaseLog] = {};
+  int phase_log_count_ = 0;
+  uint32_t lead_ms_ = 0;
   uint32_t acquired_ts_ = 0;
   uint32_t phase_ts_ = 0;
   uint32_t acquire_seq_ = 0;
@@ -3431,6 +3458,7 @@ void Ui::apply_page_visibility() {
       settled_page1 && !portal_hint_text_.empty() &&
       (portal_hint_has_priority || !detail_visible_);
 
+  LvglLockGuard::note_phase("pv_pages");
   for (int u = 0; u < kMaxAmsUnits; ++u) {
     if (ams_pages_[u] != nullptr) {
       set_hidden(ams_pages_[u], !ams_unit_present_[u]);
@@ -3438,6 +3466,7 @@ void Ui::apply_page_visibility() {
   }
   set_hidden(page2_, !preview_page_available_);
   set_hidden(page3_, !camera_page_available_);
+  LvglLockGuard::note_phase("pv_widgets");
   set_hidden(status_label_, !on_page1);
   set_hidden(detail_label_, !on_page1 || !detail_visible_ || show_portal_hint);
   set_hidden(layer_row_, !on_page1);
@@ -3457,10 +3486,12 @@ void Ui::apply_page_visibility() {
 
   // Overlay + page0 opacity are driven by apply_page0_parallax.
   // When not scrolling, snap to final state.
+  LvglLockGuard::note_phase("pv_parallax");
   if (!scrolling_) {
     apply_page0_parallax(true);
   }
 
+  LvglLockGuard::note_phase("pv_logo_portal");
   apply_logo_visibility();
   update_portal_access_visuals_locked();
 }
@@ -3481,24 +3512,48 @@ void Ui::update_page_availability_locked(const PrinterSnapshot& snapshot) {
   const bool camera_available = snapshot.camera_page_available;
   const uint8_t ams_count = snapshot.ams ? snapshot.ams->count : 0;
   const bool ams_big_present = snapshot.ams != nullptr && snapshot.ams->big.present;
+
+  bool desired_ams[kMaxAmsUnits] = {};
+  uint32_t desired_mask = (preview_available ? 1U : 0U) | (camera_available ? 2U : 0U);
+  uint32_t applied_mask = (preview_page_available_ ? 1U : 0U) | (camera_page_available_ ? 2U : 0U);
+  for (int u = 0; u < kMaxAmsUnits; ++u) {
+    desired_ams[u] = u < ams_count || (u == 0 && ams_big_present);
+    if (desired_ams[u]) desired_mask |= 4U << u;
+    if (ams_unit_present_[u]) applied_mask |= 4U << u;
+  }
+
+  // Debounce: a change must persist for kPageAvailabilityDebounceMs before it is applied.
+  // Source flaps (model detected after the first snapshot, a source briefly dropping out)
+  // would otherwise show/hide whole pager pages back and forth.
+  constexpr uint32_t kPageAvailabilityDebounceMs = 1500;
+  if (desired_mask == applied_mask) {
+    availability_pending_mask_ = applied_mask;
+    return;
+  }
+  const uint32_t now_ms = esp_log_timestamp();
+  if (desired_mask != availability_pending_mask_) {
+    availability_pending_mask_ = desired_mask;
+    availability_pending_since_ms_ = now_ms;
+    return;
+  }
+  if (now_ms - availability_pending_since_ms_ < kPageAvailabilityDebounceMs) {
+    return;
+  }
+
   bool ams_changed = false;
   for (int u = 0; u < kMaxAmsUnits; ++u) {
-    const bool present = u < ams_count || (u == 0 && ams_big_present);
-    if (ams_unit_present_[u] != present) {
-      ams_unit_present_[u] = present;
+    if (ams_unit_present_[u] != desired_ams[u]) {
+      ams_unit_present_[u] = desired_ams[u];
       ams_changed = true;
     }
   }
-  const bool availability_changed =
-      preview_page_available_ != preview_available || camera_page_available_ != camera_available ||
-      ams_changed;
+  ESP_LOGI(kTag, "Page availability changed: preview %d->%d camera %d->%d ams_changed=%d",
+           preview_page_available_ ? 1 : 0, preview_available ? 1 : 0,
+           camera_page_available_ ? 1 : 0, camera_available ? 1 : 0, ams_changed ? 1 : 0);
 
   preview_page_available_ = preview_available;
   camera_page_available_ = camera_available;
-
-  if (!availability_changed) {
-    return;
-  }
+  availability_pending_mask_ = desired_mask;
 
   for (int u = 0; u < kMaxAmsUnits; ++u) {
     if (ams_pages_[u] != nullptr) {

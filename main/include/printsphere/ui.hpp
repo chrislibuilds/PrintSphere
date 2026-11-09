@@ -283,7 +283,13 @@ class Ui {
   bool preview_page_available_ = true;
   bool preview_image_visible_ = false;
   bool preview_text_image_mode_ = false;
-  bool camera_page_available_ = true;
+  // Starts false: the first merged snapshot reports no camera until the model/route is known, so
+  // starting true would hide the page again on the first update (a 180 ms layout hit at boot).
+  bool camera_page_available_ = false;
+  // Page-availability changes are applied only after they stay stable (debounce), because
+  // showing/hiding a pager page costs 100-200 ms of LVGL layout under the LVGL lock.
+  uint32_t availability_pending_mask_ = 0;
+  uint32_t availability_pending_since_ms_ = 0;
   bool camera_image_visible_ = false;
   bool camera_text_image_mode_ = false;
   bool nozzle_aux_visible_ = false;

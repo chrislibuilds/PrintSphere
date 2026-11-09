@@ -2564,6 +2564,15 @@ void BambuCloudClient::handle_mqtt_event(esp_mqtt_event_handle_t event) {
         break;
       }
       ESP_LOGW(kTag, "Cloud MQTT transport error");
+      if (const auto* detail = event->error_handle; detail != nullptr) {
+        ESP_LOGW(kTag,
+                 "Cloud MQTT error detail: type=%d tls_esp_err=0x%x tls_stack_err=0x%x "
+                 "cert_verify_flags=0x%x sock_errno=%d",
+                 static_cast<int>(detail->error_type), static_cast<unsigned>(detail->esp_tls_last_esp_err),
+                 static_cast<unsigned>(detail->esp_tls_stack_err),
+                 static_cast<unsigned>(detail->esp_tls_cert_verify_flags),
+                 detail->esp_transport_sock_errno);
+      }
       log_wifi_link_diagnostics("Cloud MQTT error");
       break;
 
@@ -4354,12 +4363,21 @@ bool BambuCloudClient::fetch_bindings() {
     copy_text(&current.detail, "Bambu Cloud session ready");
   }
   if (!best_serial.empty()) {
-    const bool serial_changed = best_serial != resolved_serial_;
+    // Compare with the serial the MQTT client was actually started with: until the first
+    // binding lookup completes that is the requested serial, not the (still empty)
+    // resolved one. Comparing against resolved_serial_ alone tore down a perfectly good
+    // client right after boot and reconnected it a second later.
+    const std::string previous_effective_serial =
+        !resolved_serial_.empty() ? resolved_serial_ : requested_serial_;
+    const bool first_resolution = resolved_serial_.empty();
+    const bool serial_changed = best_serial != previous_effective_serial;
     resolved_serial_ = best_serial;
     copy_text(&current.resolved_serial, best_serial);
     current.setup_stage = CloudSetupStage::kConnectingMqtt;
     if (serial_changed) {
       stop_mqtt_client();
+    }
+    if (serial_changed || first_resolution) {
       ESP_LOGI(kTag, "Cloud device binding resolved serial=%s", best_serial.c_str());
     }
   }
